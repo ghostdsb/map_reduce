@@ -18,7 +18,7 @@ defmodule MapReduce.Worker do
   end
 
   def do_job(worker_name, job) do
-    GenServer.call({:global, worker_name}, {"do_job", job})
+    GenServer.cast({:global, worker_name}, {"do_job", job})
   end
 
   @spec init(keyword) :: {:ok, worker_state()}
@@ -33,29 +33,20 @@ defmodule MapReduce.Worker do
     {:reply, state.output, state}
   end
 
-  def handle_call({"do_job",job}, _from, state) do
+  def handle_cast({"do_job",job}, state) do
     output =
       job
       |> perform_job()
-    ask_for_work(state.name)
       # |> IO.inspect(label: "worker-result")
     state = %{state | output: output}
-    {:reply, {output, state.name}, state}
+    MapReduce.Master.finished_job(job)
+    ask_for_work(state.name)
+    {:noreply, state}
   end
 
   def handle_info("register", state) do
     MapReduce.Master.register_worker(state.name)
-
-    ###############
-    # output =
-    #   MapReduce.Master.assign_job(state.name)
-    #   |> perform_job()
-    #   |> IO.inspect(label: "worker-result")
-    # state = %{state | output: output}
-    ###############
-    # MapReduce.Master.worker_ready(state.name)
     ask_for_work(state.name)
-    ###############
     {:noreply, state}
   end
 
