@@ -8,7 +8,7 @@ defmodule MapReduce.Master do
     map_files: map(),
     reduce_files: map(),
     pending_jobs: map(),
-    backlog_jobs: list(MapReduce.Job.job|nil)
+    backlog_jobs: list(MapReduce.Job.job)
   }
 
 
@@ -37,7 +37,7 @@ defmodule MapReduce.Master do
   def init(_opts) do
     Logger.info("Master started")
     files = get_files()
-    map_files = files |> get_initial_map_file_map
+    map_files = files |> get_initial_mapfiles_map
 
     {:ok, %{
       filenames: files,
@@ -54,13 +54,14 @@ defmodule MapReduce.Master do
     {job, state} =
       case find_job(worker_name, state) do
         {:nil, state} ->
+          state
+          |> check_job_completion()
           {:nil, state}
         {job, state} ->
-          state = Map.put(state, worker_name, job)
-          # TODO: assign job to worker
-          # MapReduce.Worker.assign_job(worker_name, job)
+          state = %{state | pending_jobs: Map.put(state.pending_jobs, worker_name, job)}
 
           # TODO: ping worker
+          Process.send_after(self(), {"ping_worker", worker_name}, 10000)
 
           {job, state}
       end
@@ -69,7 +70,6 @@ defmodule MapReduce.Master do
 
   def handle_cast({"connect_worker", worker_name}, state) do
     Logger.info("WORKER to MASTER #{inspect(worker_name)}")
-    worker_name |> IO.inspect(label: "worker name")
     # TODO: register_conf
     MapReduce.Worker.register_confirmation(worker_name)
     {:noreply, state}
@@ -82,6 +82,31 @@ defmodule MapReduce.Master do
     {:noreply, state}
   end
 
+  def handle_info({"ping_worker", worker_name}, state) do
+    # TODO: ping worker
+    # Logger.info("Checking if #{inspect(worker_name)} is alive")
+    state =
+      case :global.whereis_name(worker_name) do
+        :undefined ->
+          job = Map.get(state.pending_jobs, worker_name)
+          case job do
+            nil ->
+              state
+            _ ->
+              Logger.info("#{inspect(worker_name)} not alive, putting job to backlog")
+              %{state |
+              backlog_jobs: [job | state.backlog_jobs],
+              pending_jobs: Map.drop(state.pending_jobs, [worker_name])
+            }
+          end
+        _ ->
+          # Logger.info("#{inspect(worker_name)} is alive")
+          Process.send_after(self(), {"ping_worker", worker_name}, 10000)
+          state
+    end
+    {:noreply, state}
+  end
+
   ###############################
 
   defp get_files() do
@@ -89,7 +114,7 @@ defmodule MapReduce.Master do
     |> File.ls!()
   end
 
-  defp get_initial_map_file_map(files) do
+  defp get_initial_mapfiles_map(files) do
     files
       |> Enum.map(fn file -> {file, true} end)
       |> Map.new()
@@ -99,7 +124,7 @@ defmodule MapReduce.Master do
     with {:not_found, state} <- from_backlog(state),
     {:not_found, state} <- map_jobs(state),
     {:not_found, state} <- reduce_jobs(state) do
-      Logger.info("No jobs")
+      # Logger.info("No jobs")
       {:nil, state}
     else
       {:found, :backlog, job, state} ->
@@ -169,6 +194,21 @@ defmodule MapReduce.Master do
     worker = job.worker
     pending_jobs = Map.drop(state.pending_jobs, [worker])
     %{state| pending_jobs: pending_jobs}
+  end
+
+  defp check_job_completion(state) do
+    jobs = Enum.count(state.pending_jobs) +
+      Enum.count(state.backlog_jobs) +
+      Enum.count(state.map_files) +
+      Enum.count(state.reduce_files)
+    case jobs do
+      0 ->
+        # MapReduce.check_distributed_mapreduce()
+        Logger.info("ALL JOBS DONE!")
+
+      _ ->
+        Logger.info("waiting for job completion")
+    end
   end
 
 end

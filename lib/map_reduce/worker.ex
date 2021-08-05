@@ -20,9 +20,10 @@ defmodule MapReduce.Worker do
     GenServer.cast({:global, worker_name}, "connected")
   end
 
-  # def assign_job(worker_name, job) do
-  #   GenServer.cast({:global, worker_name}, {"execute_job", job})
-  # end
+  def get_status(worker_name) do
+    GenServer.call({:global, worker_name}, "get_status")
+  end
+
 
   #############################
 
@@ -37,13 +38,13 @@ defmodule MapReduce.Worker do
     }}
   end
 
+
+  def handle_call("get_status", _from, state) do
+    {:reply, state.status, state}
+  end
+
   def  handle_cast("connected", state) do
     Process.send_after(self(), "ask_for_job", 1000)
-    # Logger.info("ASKING FOR JOB!")
-    # # TODO: ask for job
-    # job = MapReduce.Master.get_job(state.name) |> IO.inspect(label: "THIS JOB")
-    # Process.send_after(self(), {"start_job", job}, 1000)
-    # state = %{state| status: :busy}
     {:noreply, state}
   end
 
@@ -92,7 +93,7 @@ defmodule MapReduce.Worker do
       job ->
         Logger.info("doing #{inspect(job)}")
         Process.send_after(self(), {"start_job", job}, 1000)
-        state = %{state| status: :busy}
+        %{state| status: :busy}
     end
     {:noreply, state}
   end
@@ -114,7 +115,7 @@ defmodule MapReduce.Worker do
 
     io_device =
       "mr-intermediate-#{filename}"
-      |> File.open!([:write, :append, :utf8])
+      |> File.open!([:write, :utf8])
 
     IO.write(io_device, i_data)
   end
@@ -126,7 +127,7 @@ defmodule MapReduce.Worker do
 
     io_device =
       "mr-final-#{filename}"
-      |> File.open!([:write, :append, :utf8])
+      |> File.open!([:write, :utf8])
 
     data = content
       |> String.split("\n")

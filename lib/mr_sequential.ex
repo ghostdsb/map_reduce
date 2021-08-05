@@ -1,14 +1,16 @@
 defmodule MrSequential do
 
-  def run(application, dirname) do
-    intermediate =
+  def run(application, dirname\\ "priv/resources") do
       dirname
       |> File.ls!()
-      |> Enum.reduce([], fn filename, itr_data ->
-        loc = "#{dirname}/#{filename}"
-        content = File.read!(loc)
-        itr_data ++ application.mapper(loc, content)
-      end)
+      |> Enum.each(fn filename -> filename |> process_file(application) end)
+  end
+
+  defp process_file(filename, application) do
+    loc = "priv/resources/#{filename}"
+    content = File.read!(loc)
+    intermediate =
+      application.mapper(loc, content)
       |> Enum.sort()
       |> Enum.chunk_by(fn {k,_v} -> k end)
 
@@ -38,7 +40,7 @@ defmodule MrSequential do
 # ]
 
     io_device =
-      "mr-out-0"
+      "mr-seq-#{filename}"
       |> File.open!([:write, :append, :utf8])
 
     process_intermediate(intermediate, application, io_device)
