@@ -4,155 +4,171 @@ defmodule MapReduce.Master do
   require Logger
 
   @type master_state :: %{
-    jobs: list(MapReduce.Job.job()),
-    n_map_jobs: integer(),
-    files: list(String.t()),
-    n_reduce_jobs: integer(),
-    intermediate: list(any())
+    filenames: list(String.t()),
+    map_files: map(),
+    reduce_files: map(),
+    pending_jobs: map(),
+    backlog_jobs: list(MapReduce.Job.job|nil)
   }
 
+
+  #############################
+
+  @spec start_link(any) :: :ignore | {:error, any} | {:ok, pid}
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: {:global, :master})
   end
 
-  def peek_state do
-    GenServer.call({:global, :master}, "peek")
+  def connect(worker_name) do
+    GenServer.cast({:global, :master}, {"connect_worker", worker_name})
   end
 
-  def register_worker(worker_name) do
-    GenServer.call({:global, :master}, {"register", worker_name})
+  def get_job(worker_name) do
+    GenServer.call({:global, :master}, {"get_job", worker_name})
   end
 
-  def assign_job(worker_name) do
-    GenServer.call({:global, :master}, {"assign", worker_name})
+  def job_done(worker_name, job) do
+    GenServer.cast({:global, :master}, {"job_done", worker_name, job})
   end
 
-  def worker_ready(worker_name) do
-    GenServer.cast({:global, :master}, {"worker_ready", worker_name})
-  end
-
-  def finished_job(job) do
-    GenServer.cast({:global, :master}, {"finished_job", job})
-  end
+  #############################
 
   @spec init(any) :: {:ok, master_state()}
   def init(_opts) do
-    Process.flag(:trap_exit, true)
-    IO.inspect("Master started")
-    files =
-      File.ls!("priv/resources")
-      |> Enum.with_index()
+    Logger.info("Master started")
+    files = get_files()
+    map_files = files |> get_initial_map_file_map
+
     {:ok, %{
-      files: files,
-      n_map_jobs: files |> Enum.count,
-      n_reduce_jobs: 0,
-      intermediate: [],
-      jobs: []
-    }
-    }
+      filenames: files,
+      map_files: map_files,
+      reduce_files: %{},
+      pending_jobs: %{},
+      backlog_jobs: []
+    }}
   end
 
-  def handle_call("peek", _from, state) do
-    {:reply, state, state}
-  end
+  def handle_call({"get_job", worker_name},_from, state) do
+    Logger.info("WORKER #{inspect(worker_name)} to asking for job ")
+    # TODO: get a job
+    {job, state} =
+      case find_job(worker_name, state) do
+        {:nil, state} ->
+          {:nil, state}
+        {job, state} ->
+          state = Map.put(state, worker_name, job)
+          # TODO: assign job to worker
+          # MapReduce.Worker.assign_job(worker_name, job)
 
-  def handle_call({"register", worker_name}, _from, state) do
-    {:reply, :ok, state}
-  end
+          # TODO: ping worker
 
-  def handle_call({"assign", worker_name}, _from, state) do
-    # find job
-    {job, rest, type} = find_job(state, worker_name)
-    state = case type do
-      :map -> %{state| files: rest}
-      :reduce -> %{state| intermediate: rest}
-    end
+          {job, state}
+      end
     {:reply, job, state}
   end
 
+  def handle_cast({"connect_worker", worker_name}, state) do
+    Logger.info("WORKER to MASTER #{inspect(worker_name)}")
+    worker_name |> IO.inspect(label: "worker name")
+    # TODO: register_conf
+    MapReduce.Worker.register_confirmation(worker_name)
+    {:noreply, state}
+  end
 
-  def handle_cast({"worker_ready", worker_name}, state) do
-    {job, rest, type} = find_job(state, worker_name)
-    IO.inspect("#{worker_name} asking for work")
-    case type do
-      :nil ->
-        IO.inspect("no more jobs to be done #{worker_name}")
-        {:noreply, state}
-      _ ->
-        state = case type do
-          :map ->
-            %{state|
-            files: rest
-          }
-          :reduce ->
-            %{state|
-            intermediate: rest
-          }
-        end
-        MapReduce.Worker.do_job(worker_name, job)
-        {:noreply, state}
+
+  def handle_cast({"job_done", _worker, job}, state) do
+    # TODO: job cleanup
+    state = post_job_done(job, state)
+    {:noreply, state}
+  end
+
+  ###############################
+
+  defp get_files() do
+    "priv/resources"
+    |> File.ls!()
+  end
+
+  defp get_initial_map_file_map(files) do
+    files
+      |> Enum.map(fn file -> {file, true} end)
+      |> Map.new()
+  end
+
+  defp find_job(worker, state) do
+    with {:not_found, state} <- from_backlog(state),
+    {:not_found, state} <- map_jobs(state),
+    {:not_found, state} <- reduce_jobs(state) do
+      Logger.info("No jobs")
+      {:nil, state}
+    else
+      {:found, :backlog, job, state} ->
+        Logger.info("found backlog job")
+        job = %{job | worker: worker}
+        {job, state}
+      {:found, :map, file, state} ->
+        # TODO: make map job
+        Logger.info("found map job")
+        job = MapReduce.Job.new(:map, file, worker)
+        {job, state}
+      {:found, :reduce, file, state} ->
+        # TODO: make reduce job
+        Logger.info("found reduce job")
+        job = MapReduce.Job.new(:reduce, file, worker)
+        {job, state}
     end
+    # job preference
+    #  - Backlog
+    #  - Map
+    #  - Reduce
+    # no job, do nothing
   end
 
-  def handle_cast({"finished_job", job}, state) do
-    %{type: type, worker: worker, resource: resource} = job
-    state = case type do
-      :map ->
-        {res, _idx} = resource
-        IO.inspect(label: "map job of #{res} done by #{worker}")
-
-        %{state|
-        # files: state.files -- [res],
-        intermediate: [resource| state.intermediate],
-        n_map_jobs: state.n_map_jobs-1,
-        n_reduce_jobs: state.n_reduce_jobs+1,
-      }
-    :reduce ->
-      {res, _idx} = resource
-      IO.inspect(label: "reduce job of #{res} done by #{worker}")
-      state
-    end
-    {:noreply, state}
+  defp from_backlog(%{backlog_jobs: []} = state), do: {:not_found, state}
+  defp from_backlog(%{backlog_jobs: [h|t]} = state) do
+    {:found,:backlog, h, %{state| backlog_jobs: t}}
   end
 
-  def handle_info({:EXIT, _pid, reason}, state) do
-    reason
-    |> IO.inspect(label: "exit")
-    {:noreply, state}
-  end
-
-  def handle_info(message, state) do
-    message |> Logger.info(label: "handleinfo")
-    {:noreply, state}
-  end
-
-  defp find_job(state, worker_name) do
+  defp map_jobs(%{map_files: map_files}=state) do
     cond do
-      state.n_map_jobs > 0 ->
-        {job_file, rest} = state.files |> get_map_file()
-        case job_file do
-          :nil ->
-            {:nil, [], :nil}
-          _ ->
-            job = MapReduce.Job.new(:map, job_file, worker_name)
-            {job, rest, :map}
-        end
+      Enum.empty?(map_files) ->
+        {:not_found, state}
       true ->
-        # [done_by|rest] = state.intermediate
-        {file, rest} = state.intermediate |> get_intermediate()
-        case file do
-          :nil ->
-            {:nil, [], :nil}
-          _ ->
-            job = MapReduce.Job.new(:reduce, file, worker_name)
-            {job, rest, :reduce}
-        end
+        {job_file, rest} =
+          map_files
+          |> Map.keys
+          |> List.first
+          |> then(&({ &1, Map.drop(map_files, [&1]) }))
+        {:found, :map, job_file, %{state| map_files: rest}}
     end
-    # {job,rest}
   end
 
-  defp get_map_file([]), do: {:nil, []}
-  defp get_map_file([file|rest]), do: {file, rest}
-  defp get_intermediate([]), do: {:nil, []}
-  defp get_intermediate([file|rest]), do: {file, rest}
+  defp reduce_jobs(%{reduce_files: reduce_files}=state) do
+    cond do
+      Enum.empty?(reduce_files) ->
+        {:not_found, state}
+      true ->
+        {job_file, rest} =
+          reduce_files
+          |> Map.keys
+          |> List.first
+          |> then(&({ &1, Map.drop(reduce_files, [&1]) }))
+        {:found,:reduce, job_file, %{state| reduce_files: rest}}
+    end
+  end
+
+  defp post_job_done(%{type: :map} = job, state) do
+    filename = job.filename
+    worker = job.worker
+    pending_jobs = Map.drop(state.pending_jobs, [worker])
+    reduce_files = Map.put(state.reduce_files, filename, true)
+    %{state| reduce_files: reduce_files, pending_jobs: pending_jobs}
+  end
+
+  defp post_job_done(%{type: :reduce} = job, state) do
+    worker = job.worker
+    pending_jobs = Map.drop(state.pending_jobs, [worker])
+    %{state| pending_jobs: pending_jobs}
+  end
+
 end

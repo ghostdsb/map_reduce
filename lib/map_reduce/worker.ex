@@ -5,125 +5,127 @@ defmodule MapReduce.Worker do
 
   @type worker_state :: %{
     name: atom(),
-    status: :busy | :idle,
-    output: any()
+    status: :busy | :idle
   }
 
+  ############################
+
+  @spec start_link(keyword) :: :ignore | {:error, any} | {:ok, pid}
   def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts, name: {:global, Keyword.fetch!(opts, :name)})
+    name = Keyword.fetch!(opts, :name) |> IO.inspect(label: "opts")
+    GenServer.start_link(__MODULE__, name, name: {:global, name})
   end
 
-  def get_output(worker_name) do
-    GenServer.call({:global, worker_name}, "get_output")
+  def register_confirmation(worker_name) do
+    GenServer.cast({:global, worker_name}, "connected")
   end
 
-  def do_job(worker_name, job) do
-    GenServer.cast({:global, worker_name}, {"do_job", job})
-  end
+  # def assign_job(worker_name, job) do
+  #   GenServer.cast({:global, worker_name}, {"execute_job", job})
+  # end
+
+  #############################
 
   @spec init(keyword) :: {:ok, worker_state()}
-  def init(opts) do
-    name = Keyword.fetch!(opts, :name)
-    IO.inspect("Worker #{name} started")
-    connect_master_node(name)
-    {:ok, %{name: name, status: :idle, output: nil}}
+  def init(name) do
+    Logger.info("Worker #{inspect(name)} started")
+    Process.send_after(self(), "connect_to_master", 2000)
+
+    {:ok, %{
+      name: name,
+      status: :idle
+    }}
   end
 
-  def handle_call("get_output", _from, state) do
-    {:reply, state.output, state}
-  end
-
-  def handle_cast({"do_job",job}, state) do
-    output =
-      job
-      |> perform_job()
-      # |> IO.inspect(label: "worker-result")
-    state = %{state | output: output}
-    MapReduce.Master.finished_job(job)
-    ask_for_work(state.name)
+  def  handle_cast("connected", state) do
+    Process.send_after(self(), "ask_for_job", 1000)
+    # Logger.info("ASKING FOR JOB!")
+    # # TODO: ask for job
+    # job = MapReduce.Master.get_job(state.name) |> IO.inspect(label: "THIS JOB")
+    # Process.send_after(self(), {"start_job", job}, 1000)
+    # state = %{state| status: :busy}
     {:noreply, state}
   end
 
-  def handle_info("register", state) do
-    MapReduce.Master.register_worker(state.name)
-    ask_for_work(state.name)
+  def handle_cast({"execute_job", job}, state) do
+    Process.send_after(self(), {"start_job", job}, 1000)
+    state = %{state| status: :busy}
     {:noreply, state}
   end
 
-  def handle_info("ask_for_work", state) do
-    MapReduce.Master.worker_ready(state.name)
-    # ask_for_work(state.name)
-    {:noreply, state}
-  end
-
-  defp connect_master_node(_name) do
-    cond do
-      Node.connect(:master@titan) ->
-        IO.inspect(label: "master connection")
-        Process.send_after(self(), "register", 5000)
+  def handle_info("connect_to_master", state) do
+    Logger.info("connecting to master")
+    case Node.connect(:master@titan) do
       true ->
-        Logger.info("Error connecting to master")
+        # connect_master
+        Process.send_after(self(), "connect_delay", 1000)
+      _ ->
+        Logger.info("could not connect to master")
     end
+    {:noreply, state}
   end
 
-  defp ask_for_work(name) do
-    IO.inspect("#{name} asking for work")
-    Process.send_after(self(), "ask_for_work", 3000)
+  def handle_info("connect_delay", state) do
+    Logger.info("CONNECTED TO MASTER")
+    MapReduce.Master.connect(state.name)
+    {:noreply, state}
   end
 
-  defp perform_job(job) do
-    perform_job(job, job.type)
+  def handle_info({"start_job", job}, state) do
+    # TODO: execute job
+    job |> execute_job()
 
+    # TODO: job done
+    MapReduce.Master.job_done(state.name, job)
+    Process.send_after(self(), "ask_for_job", 1000)
+    state = %{state| status: :idle}
+    {:noreply, state}
   end
 
-  defp perform_job(job, :map) do
-    {filename, _idx} = job.resource
-    IO.inspect(label: "doing map job of #{filename}")
+  def handle_info("ask_for_job", state) do
+    Logger.info("ASKING FOR JOB!")
+    # TODO: ask for job
+    state = case MapReduce.Master.get_job(state.name) do
+      :nil ->
+        Logger.info("jobs completed")
+        state
+      job ->
+        Logger.info("doing #{inspect(job)}")
+        Process.send_after(self(), {"start_job", job}, 1000)
+        state = %{state| status: :busy}
+    end
+    {:noreply, state}
+  end
+
+  ################################
+
+  defp execute_job(%{type: :map}=job) do
+    filename = job.filename
     loc = "priv/resources/#{filename}"
     content = File.read!(loc)
-    data = WordCount.mapper(loc, content)
-    |> Enum.sort()
 
-    i_data = data
-    |> Enum.map(fn {key, val} -> "#{key}:#{val}\n"end)
+    data =
+      WordCount.mapper(loc, content)
+      |> Enum.sort()
+
+    i_data =
+      data
+      |> Enum.map(fn {key, val} -> "#{key}:#{val}\n"end)
 
     io_device =
       "mr-intermediate-#{filename}"
       |> File.open!([:write, :append, :utf8])
+
     IO.write(io_device, i_data)
-
-    data
   end
-  # defp perform_job(job, :map) do
-  #   {filename, _idx} = job.resource
-  #   loc = "priv/resources/#{filename}"
-  #   content = File.read!(loc)
-  #   data = WordCount.mapper(loc, content)
-  #   |> Enum.sort()
-  #   |> Enum.chunk_by(fn {k,_v} -> k end)
 
-  #   i_data = data
-  #   |> Enum.map(fn {key, val} -> "#{key}:#{value}"end)
-  #   |> Enum.reduce("", fn {key, val}, acc ->
-
-  #   end)
-  #   io_device =
-  #     "mr-intermediate-#{filename}"
-  #     |> File.open!([:write, :append, :utf8])
-  #   IO.write(io_device, data)
-
-  #   data
-  # end
-
-  defp perform_job(job, :reduce) do
-    {resource_filename, _idx} =
-      job.resource
-    IO.inspect(label: "doing reduce job of #{resource_filename}")
-    loc = "mr-intermediate-#{resource_filename}"
+  defp execute_job(%{type: :reduce}=job) do
+    filename = job.filename
+    loc = "mr-intermediate-#{filename}"
     content = File.read!(loc)
 
     io_device =
-      "mr-final-#{resource_filename}"
+      "mr-final-#{filename}"
       |> File.open!([:write, :append, :utf8])
 
     data = content
@@ -136,22 +138,10 @@ defmodule MapReduce.Worker do
     |> Enum.map(fn chunk ->
       [[key, _val]|_] = chunk
       count = WordCount.reducer(key, chunk)
+
       IO.write(io_device, "#{key} #{count}\n")
     end)
 
   end
-  # defp perform_job(job, :reduce) do
-  #   worker_name =
-  #     job.resource
 
-  #   data = worker_name
-  #     |> MapReduce.Worker.get_output()
-
-  #   data
-  #   |> Enum.map(fn chunk ->
-  #     [{key, _val}|_] = chunk
-  #     {key, WordCount.reducer(key, chunk)}
-  #   end)
-
-  # end
 end
