@@ -121,6 +121,11 @@ defmodule MapReduce.Master do
   end
 
   defp find_job(worker, state) do
+    # job preference
+    #  - Backlog
+    #  - Map
+    #  - Reduce
+    # no job, do nothing
     with {:not_found, state} <- from_backlog(state),
     {:not_found, state} <- map_jobs(state),
     {:not_found, state} <- reduce_jobs(state) do
@@ -142,11 +147,6 @@ defmodule MapReduce.Master do
         job = MapReduce.Job.new(:reduce, file, worker)
         {job, state}
     end
-    # job preference
-    #  - Backlog
-    #  - Map
-    #  - Reduce
-    # no job, do nothing
   end
 
   defp from_backlog(%{backlog_jobs: []} = state), do: {:not_found, state}
