@@ -88,6 +88,7 @@ defmodule MapReduce.Worker do
     # TODO: ask for job
     state = case MapReduce.Master.get_job(state.name) do
       :nil ->
+        :init.stop()
         Logger.info("jobs completed")
         state
       job ->
@@ -102,32 +103,25 @@ defmodule MapReduce.Worker do
 
   defp execute_job(%{type: :map}=job) do
     filename = job.filename
+    file_id = job.file_id
     loc = "priv/resources/#{filename}"
     content = File.read!(loc)
 
-    data =
-      WordCount.mapper(loc, content)
-      |> Enum.sort()
 
-    i_data =
-      data
-      |> Enum.map(fn {key, val} -> "#{key}:#{val}\n"end)
-
-    io_device =
-      "mr-intermediate-#{filename}"
-      |> File.open!([:write, :utf8])
-
-    IO.write(io_device, i_data)
+    WordCount.mapper(loc, content)
+    |> Enum.sort()
+    |> Enum.each(fn {key, val} -> write_to_intermediate_phase(file_id, key, val) end)
   end
 
   defp execute_job(%{type: :reduce}=job) do
     filename = job.filename
-    loc = "mr-intermediate-#{filename}"
+    output_loc = String.split(filename, "_") |> List.first()
+    loc = "d-intermediate/#{filename}"
     content = File.read!(loc)
 
     io_device =
-      "mr-final-#{filename}"
-      |> File.open!([:write, :utf8])
+      "d-output/#{output_loc}.txt"
+      |> File.open!([:write, :append, :utf8])
 
     data = content
       |> String.split("\n")
@@ -143,6 +137,16 @@ defmodule MapReduce.Worker do
       IO.write(io_device, "#{key} #{count}\n")
     end)
 
+  end
+
+  defp write_to_intermediate_phase(file_id, key, val) do
+    n_workers = Application.get_env(:map_reduce, :n_workers)
+    partition_id = rem(:erlang.phash2(key), n_workers)
+    io_device =
+      "d-intermediate/#{file_id}_#{partition_id}.txt"
+      |> File.open!([:write, :append, :utf8])
+    IO.write(io_device, "#{key}:#{val}\n")
+      File.close(io_device)
   end
 
 end

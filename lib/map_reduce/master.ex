@@ -5,8 +5,8 @@ defmodule MapReduce.Master do
 
   @type master_state :: %{
     filenames: list(String.t()),
-    map_files: map(),
-    reduce_files: map(),
+    map_files: list({String.t(), integer()}),
+    reduce_files: list(String.t()),
     pending_jobs: map(),
     backlog_jobs: list(MapReduce.Job.job)
   }
@@ -42,7 +42,7 @@ defmodule MapReduce.Master do
     {:ok, %{
       filenames: files,
       map_files: map_files,
-      reduce_files: %{},
+      reduce_files: [],
       pending_jobs: %{},
       backlog_jobs: []
     }}
@@ -116,8 +116,7 @@ defmodule MapReduce.Master do
 
   defp get_initial_mapfiles_map(files) do
     files
-      |> Enum.map(fn file -> {file, true} end)
-      |> Map.new()
+      |> Enum.with_index()
   end
 
   defp find_job(worker, state) do
@@ -136,10 +135,10 @@ defmodule MapReduce.Master do
         Logger.info("found backlog job")
         job = %{job | worker: worker}
         {job, state}
-      {:found, :map, file, state} ->
+      {:found, :map, {file, idx}, state} ->
         # TODO: make map job
         Logger.info("found map job")
-        job = MapReduce.Job.new(:map, file, worker)
+        job = MapReduce.Job.new(:map, file, idx, worker)
         {job, state}
       {:found, :reduce, file, state} ->
         # TODO: make reduce job
@@ -154,39 +153,24 @@ defmodule MapReduce.Master do
     {:found,:backlog, h, %{state| backlog_jobs: t}}
   end
 
-  defp map_jobs(%{map_files: map_files}=state) do
-    cond do
-      Enum.empty?(map_files) ->
-        {:not_found, state}
-      true ->
-        {job_file, rest} =
-          map_files
-          |> Map.keys
-          |> List.first
-          |> then(&({ &1, Map.drop(map_files, [&1]) }))
-        {:found, :map, job_file, %{state| map_files: rest}}
-    end
-  end
+  defp map_jobs(%{map_files: []}=state), do: {:not_found, state}
+  defp map_jobs(%{map_files: [h|rest]}=state), do: {:found, :map, h, %{state| map_files: rest}}
 
-  defp reduce_jobs(%{reduce_files: reduce_files}=state) do
-    cond do
-      Enum.empty?(reduce_files) ->
-        {:not_found, state}
-      true ->
-        {job_file, rest} =
-          reduce_files
-          |> Map.keys
-          |> List.first
-          |> then(&({ &1, Map.drop(reduce_files, [&1]) }))
-        {:found,:reduce, job_file, %{state| reduce_files: rest}}
-    end
-  end
+  defp reduce_jobs(%{reduce_files: []}=state), do: {:not_found, state}
+  defp reduce_jobs(%{reduce_files: [h|rest]}=state), do: {:found, :reduce, h, %{state| reduce_files: rest}}
 
   defp post_job_done(%{type: :map} = job, state) do
-    filename = job.filename
+    file_id = job.file_id
     worker = job.worker
+    n_workers = Application.get_env(:map_reduce, :n_workers)
+    intermediate_files =
+      file_id
+      |> List.duplicate(n_workers)
+      |> Enum.with_index()
+      |> Enum.map(fn {id, index} -> "#{id}_#{index}.txt" end)
+
     pending_jobs = Map.drop(state.pending_jobs, [worker])
-    reduce_files = Map.put(state.reduce_files, filename, true)
+    reduce_files = state.reduce_files ++ intermediate_files
     %{state| reduce_files: reduce_files, pending_jobs: pending_jobs}
   end
 
