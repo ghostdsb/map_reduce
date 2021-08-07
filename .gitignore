@@ -25,3 +25,8 @@ map_reduce-*.tar
 
 # Temporary files for e.g. tests
 /tmp
+
+
+/seq-output/*
+/d-intermediate/*
+/d-output/*

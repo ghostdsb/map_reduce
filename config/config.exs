@@ -6,3 +6,5 @@ config :map_reduce,
 config :map_reduce,
  :mr_mode,
   String.to_atom(System.get_env("MR_MODE") || "master")
+
+config :map_reduce, :n_workers, 8
